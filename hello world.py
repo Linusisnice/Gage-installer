@@ -10,6 +10,8 @@ from tkinter import ttk
 import xmlrpc.client
 import time
 import shutil
+import pyautogui  # Library to simulate keypresses and mouse movements
+import re
 
 # Path to the aria2 executable
 ARIA2_PATH = os.path.join(os.getcwd(), 'aria2c.exe')
@@ -18,8 +20,11 @@ ARIA2_PATH = os.path.join(os.getcwd(), 'aria2c.exe')
 download_queue = []
 current_gid = None
 server = None
+aria2_process = None
 total_files_length = 0  # Total length of all files
 completed_length = 0  # Completed length of all downloads
+metadata_downloaded = False  # Flag to track if metadata has been downloaded
+console_window = None  # The console window
 
 # Function to fetch search results
 def fetch_search_results(query):
@@ -39,14 +44,37 @@ def fetch_download_links(page_url):
     response = requests.get(page_url)
     if response.status_code == 200:
         soup = BeautifulSoup(response.text, 'html.parser')
-        download_section = soup.find(text="Download Mirrors")
-        if download_section:
-            download_container = download_section.find_parent().find_next_sibling()
-            download_links = [(a.text.strip(), a['href']) for a in download_container.find_all('a', href=True) if 'jdownloader' not in a.text.lower()]
-            return download_links
-        else:
-            messagebox.showinfo("Info", "No download mirrors found.")
-            return []
+
+        # Find all download sections (supporting variations)
+        download_section_titles = ["Download Mirrors", "Download", "Direct Links", "Torrent"]
+        download_sections = []
+        magnet_links = set()  # Use set to avoid duplicate magnet links
+
+        # Search for section headers and find their corresponding links
+        for title in download_section_titles:
+            section = soup.find(text=re.compile(f".*{title}.*", re.IGNORECASE))
+            if section:
+                download_container = section.find_parent().find_next_sibling()
+                if download_container:
+                    # Extract all links from the section
+                    links = download_container.find_all('a', href=True)
+                    for link in links:
+                        href = link['href']
+                        text = link.text.strip()
+                        # Add non-magnet links to the download sections
+                        if not href.startswith('magnet:') and 'jdownloader' not in text.lower():
+                            download_sections.append((text, href))
+                        # Add magnet links to the magnet set to avoid duplicates
+                        elif href.startswith('magnet:'):
+                            magnet_links.add(href)
+
+        # Convert magnet links set to list and add them to download sections with proper labels
+        for magnet_link in magnet_links:
+            download_sections.append(("Magnet Link", magnet_link))
+
+        # Return all collected links from various sections
+        return download_sections if download_sections else None
+
     else:
         messagebox.showerror("Error", f"Failed to retrieve download links. Status code: {response.status_code}")
         return []
@@ -110,9 +138,10 @@ def add_to_queue(magnet_link):
 
 # Function to start the next download in the queue
 def start_next_download():
-    global current_gid, server, total_files_length, completed_length
+    global current_gid, server, total_files_length, completed_length, aria2_process, metadata_downloaded
     total_files_length = 0
     completed_length = 0
+    metadata_downloaded = False  # Reset the metadata download flag
 
     if not download_queue:
         messagebox.showinfo("Queue", "No downloads left in the queue.")
@@ -121,45 +150,71 @@ def start_next_download():
     magnet_link = download_queue[0]
 
     try:
-        subprocess.Popen([ARIA2_PATH, '--enable-rpc', '--rpc-listen-all=false', '--rpc-listen-port=6800', '--dir=./downloads'], shell=True)
-        time.sleep(2)  # Allow time for aria2c to start
+        # Start aria2c with --seed-time=0 to prevent seeding
+        aria2_process = subprocess.Popen([ARIA2_PATH, '--enable-rpc', '--rpc-listen-all=false', '--rpc-listen-port=6800', '--dir=./downloads', '--seed-time=0'],
+                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, shell=True)
 
         server = xmlrpc.client.ServerProxy('http://localhost:6800/rpc')
         current_gid = server.aria2.addUri([magnet_link])
 
+        # Start the download progress tracking in a new thread
         download_thread = threading.Thread(target=track_download_progress, args=(server, current_gid))
         download_thread.start()
+
+        # Start monitoring the console output in another thread
+        console_thread = threading.Thread(target=update_console_output, args=(aria2_process,))
+        console_thread.start()
 
     except Exception as e:
         messagebox.showerror("Error", f"Failed to start download: {e}")
 
-# Function to track download progress
+# Function to update the console window and track progress for the progress bar
+def update_console_output(process):
+    global aria2_output, metadata_downloaded
+    while True:
+        line = process.stdout.readline()
+        if not line:
+            break
+
+        # Capture output from aria2c and look for percentages
+        aria2_output = line.strip()
+        print(aria2_output)  # Print to console (useful for debugging)
+
+        # Extract percentage from the line and update progress bar
+        match = re.search(r'(\d+)%', aria2_output)
+        if match:
+            percentage = int(match.group(1))
+            progress_bar['value'] = percentage
+            progress_label.config(text=f"Downloading: {percentage}%")
+
+        # Detect the "Your share ratio was" line to mark completion
+        if "Your share ratio was" in aria2_output:
+            if metadata_downloaded:  # Only open the folder after the actual data download is completed
+                progress_bar['value'] = 100
+                progress_label.config(text="Download complete!")
+                open_newest_folder(os.path.join(os.getcwd(), 'downloads'))  # Open the newly created folder
+            else:
+                metadata_downloaded = True  # Mark metadata as downloaded and ignore opening the folder
+            break
+
+        root.update_idletasks()
+
+# Function to track download progress (placeholder as progress bar is updated from console output)
 def track_download_progress(server, gid):
-    global total_files_length, completed_length
     pause_button.config(state=tk.NORMAL)
     cancel_button.config(state=tk.NORMAL)
 
     while True:
         try:
             status = server.aria2.tellStatus(gid)
-            files = server.aria2.getFiles(gid)
-
-            if not total_files_length:
-                # Calculate total length of all files after metadata download
-                total_files_length = sum(int(f['length']) for f in files if int(f['length']) > 0)
-
-            completed_length = sum(int(f['completedLength']) for f in files)
 
             # Check if the download is complete
             if status['status'] == 'complete':
                 progress_label.config(text="Download complete!")
                 progress_bar['value'] = 100
+                if metadata_downloaded:  # Ensure folder is opened after actual data download completes
+                    open_newest_folder(os.path.join(os.getcwd(), 'downloads'))
                 break
-
-            # Update progress based on all files
-            progress = (completed_length / total_files_length) * 100
-            progress_bar['value'] = progress
-            progress_label.config(text=f"Downloading: {int(progress)}% ({completed_length / (1024**2):.2f} MB / {total_files_length / (1024**2):.2f} MB)")
 
             root.update_idletasks()
 
@@ -168,6 +223,24 @@ def track_download_progress(server, gid):
             break
 
         time.sleep(1)
+
+# Function to open the newest folder in a given parent folder
+def open_newest_folder(parent_folder):
+    # Get the list of folders in the parent folder
+    folders = [os.path.join(parent_folder, d) for d in os.listdir(parent_folder) if os.path.isdir(os.path.join(parent_folder, d))]
+
+    if not folders:
+        print("No folders found.")
+        return
+
+    # Find the newest folder by comparing creation times
+    newest_folder = max(folders, key=os.path.getctime)
+
+    # Print the name of the newest folder for reference
+    print(f"Newest folder: {newest_folder}")
+
+    # Open the newest folder
+    subprocess.Popen(f'explorer "{newest_folder}"')
 
 # Function to pause or resume the current download
 def pause_download():
