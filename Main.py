@@ -156,6 +156,29 @@ def add_to_queue(magnet_link):
         start_next_download()
     update_queue_display()
 
+def openconsole():
+    global console_window, aria2_output
+
+    if console_window is not None:
+        console_window.lift()
+        return
+
+    console_window = tk.Toplevel(root)
+    console_window.title("Console Output")
+    console_window.geometry("800x400")
+
+    console_text = tk.Text(console_window, wrap=tk.WORD)
+    console_text.pack(expand=True, fill=tk.BOTH)
+
+    def update_console():
+        while True:
+            if aria2_output:
+                console_text.insert(tk.END, aria2_output + "\n")
+                console_text.see(tk.END)
+            time.sleep(1)
+
+    console_thread = threading.Thread(target=update_console, daemon=True)
+    console_thread.start()
 # Function to start the next download in the queue
 def start_next_download():
     global current_gid, server, total_files_length, completed_length, aria2_process, metadata_downloaded
@@ -293,7 +316,8 @@ def cancel_download():
         aria2_process.terminate()
         aria2_process.wait()
         aria2_process = None
-
+    progress_label.config(text="Download canceled.")
+    progress_bar['value'] = 0
     # Ensure aria2c.exe is killed
     try:
         subprocess.run(["taskkill", "/F", "/IM", "aria2c.exe"], check=True)
@@ -368,6 +392,9 @@ progress_label.pack()
 
 cancel_button = tk.Button(root, text="Cancel", command=cancel_download, font=("Arial", 12, "bold"), state=tk.DISABLED)
 cancel_button.pack(side=tk.LEFT, padx=10, pady=10)
+
+console_button = tk.Button(root, text="Show logs", command=openconsole, font=("Arial", 12, "bold"))
+console_button.pack(side=tk.LEFT, padx=5, pady=5)
 
 queue_frame = tk.Frame(root, bg="lightblue")
 queue_frame.pack(pady=10)
