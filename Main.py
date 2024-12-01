@@ -10,7 +10,6 @@ from tkinter import ttk
 import xmlrpc.client
 import time
 import shutil
-import pyautogui  # Library to simulate keypresses and mouse movements
 import re
 
 # Path to the aria2 executable
@@ -44,29 +43,50 @@ def fetch_download_links(page_url):
     response = requests.get(page_url)
     if response.status_code == 200:
         soup = BeautifulSoup(response.text, 'html.parser')
-
         # Find all download sections (supporting variations)
-        download_section_titles = ["Download Mirrors", "Download", "Direct Links", "Torrent"]
+        download_section_titles = ["Download Mirrors", "Download", "Direct Links", "Torrent", "Direct Links (Torrent)", "Download Mirrors (Direct Links)", "Download Mirrors (Torrent)", "Links", "Mirror", "Mirrors"]
         download_sections = []
         magnet_links = set()  # Use set to avoid duplicate magnet links
 
         # Search for section headers and find their corresponding links
-        for title in download_section_titles:
-            section = soup.find(text=re.compile(f".*{title}.*", re.IGNORECASE))
-            if section:
-                download_container = section.find_parent().find_next_sibling()
-                if download_container:
-                    # Extract all links from the section
-                    links = download_container.find_all('a', href=True)
-                    for link in links:
-                        href = link['href']
-                        text = link.text.strip()
-                        # Add non-magnet links to the download sections
-                        if not href.startswith('magnet:') and 'jdownloader' not in text.lower():
-                            download_sections.append((text, href))
-                        # Add magnet links to the magnet set to avoid duplicates
-                        elif href.startswith('magnet:'):
-                            magnet_links.add(href)
+    for title in download_section_titles:
+        section = soup.find('h2', text=re.compile(title, re.IGNORECASE))
+        if section:
+            download_container = section.find_parent().find_next_sibling()            
+            if download_container:
+                # Extract all links from the section
+                links = download_container.find_all('a', href=True)
+                for link in links:
+                    href = link['href']
+                    text = link.text.strip()
+                    # Add non-magnet links to the download sections
+                    if not href.startswith('magnet:') and 'jdownloader' not in text.lower():
+                        download_sections.append((text, href))
+                    # Add magnet links to the magnet set to avoid duplicates
+                    elif href.startswith('magnet:'):
+                        magnet_links.add(href)
+
+    # Find the "Popular Repacks" section
+    popular_repacks_section = soup.find('a', href=True, text=re.compile("Popular Repacks", re.IGNORECASE))
+    if popular_repacks_section:
+        popular_repacks_index = next((i for i, (text, href) in enumerate(download_sections) if text == popular_repacks_section.text.strip()), None)
+        if popular_repacks_index is not None:
+            # Remove all links below the "Popular Repacks" link
+            download_sections = download_sections[:popular_repacks_index]
+
+        # Additionally, search for links within <ul> elements
+        ul_elements = soup.find_all('ul')
+        for ul in ul_elements:
+            links = ul.find_all('a', href=True)
+            for link in links:
+                href = link['href']
+                text = link.text.strip()
+                # Add non-magnet links to the download sections
+                if not href.startswith('magnet:') and 'jdownloader' not in text.lower():
+                    download_sections.append((text, href))
+                # Add magnet links to the magnet set to avoid duplicates
+                elif href.startswith('magnet:'):
+                    magnet_links.add(href)
 
         # Convert magnet links set to list and add them to download sections with proper labels
         for magnet_link in magnet_links:
@@ -94,7 +114,7 @@ def display_results():
         for title, link in results:
             result_label = tk.Label(results_frame, text=title, fg="blue", cursor="hand2", wraplength=600, font=("Arial", 12, "bold"))
             result_label.pack(anchor='w', pady=5)
-            result_label.bind("<Button-1>", lambda e, url=link: display_download_links(url))
+            result_label.bind("<Button-1>", lambda _, url=link: display_download_links(url))
     else:
         tk.Label(results_frame, text="No results found.", fg="red", font=("Arial", 12, "italic")).pack(anchor='w')
 
@@ -188,20 +208,20 @@ def update_console_output(process):
             progress_label.config(text=f"Downloading: {percentage}%")
 
         # Detect the "Your share ratio was" line to mark completion
-        if "Your share ratio was" in aria2_output:
-            if metadata_downloaded:  # Only open the folder after the actual data download is completed
+        if "Download complete" in aria2_output:
+            if metadata_downloaded==True:  # Only open the folder after the actual data download is completed
                 progress_bar['value'] = 100
                 progress_label.config(text="Download complete!")
                 open_newest_folder(os.path.join(os.getcwd(), 'downloads'))  # Open the newly created folder
+                metadata_downloaded = False  # Reset the metadata download flag
+                break
             else:
                 metadata_downloaded = True  # Mark metadata as downloaded and ignore opening the folder
-            break
 
         root.update_idletasks()
-
+completed_download = 0
 # Function to track download progress (placeholder as progress bar is updated from console output)
 def track_download_progress(server, gid):
-    pause_button.config(state=tk.NORMAL)
     cancel_button.config(state=tk.NORMAL)
 
     while True:
@@ -210,11 +230,15 @@ def track_download_progress(server, gid):
 
             # Check if the download is complete
             if status['status'] == 'complete':
-                progress_label.config(text="Download complete!")
-                progress_bar['value'] = 100
-                if metadata_downloaded:  # Ensure folder is opened after actual data download completes
-                    open_newest_folder(os.path.join(os.getcwd(), 'downloads'))
-                break
+                if completed_download==1:
+                    progress_label.config(text="Download complete!")
+                    progress_bar['value'] = 100
+                    if metadata_downloaded:  # Ensure folder is opened after actual data download completes
+                        open_newest_folder(os.path.join(os.getcwd(), 'downloads'))
+                    break
+                else:
+                    completed_download = 1
+                    break
 
             root.update_idletasks()
 
@@ -243,34 +267,59 @@ def open_newest_folder(parent_folder):
     subprocess.Popen(f'explorer "{newest_folder}"')
 
 # Function to pause or resume the current download
-def pause_download():
-    global server, current_gid
-    try:
-        if pause_button['text'] == 'Pause':
-            server.aria2.pause(current_gid)
-            pause_button.config(text='Resume')
-        else:
-            server.aria2.unpause(current_gid)
-            pause_button.config(text='Pause')
-    except Exception as e:
-        messagebox.showerror("Error", f"Failed to pause/resume download: {e}")
+
 
 # Function to cancel the current download
+# def cancel_download():
+#     global server, current_gid
+#     try:
+#         server.aria2.remove(current_gid)
+#         download_queue.pop(0)
+#         shutil.rmtree('./downloads', ignore_errors=True)
+#         progress_label.config(text="Download canceled and files removed.")
+#         progress_bar['value'] = 0
+#         pause_button.config(state=tk.DISABLED)
+#         cancel_button.config(state=tk.DISABLED)
+#         update_queue_display()
+#         start_next_download()
+#     except Exception as e:
+#         messagebox.showerror("Error", f"Failed to cancel download: {e}")
+#         # Function to kill aria2c.exe and delete the newest folder within the downloads folder
 def cancel_download():
-    global server, current_gid
-    try:
-        server.aria2.remove(current_gid)
-        download_queue.pop(0)
-        shutil.rmtree('./downloads', ignore_errors=True)
-        progress_label.config(text="Download canceled and files removed.")
-        progress_bar['value'] = 0
-        pause_button.config(state=tk.DISABLED)
-        cancel_button.config(state=tk.DISABLED)
-        update_queue_display()
-        start_next_download()
-    except Exception as e:
-        messagebox.showerror("Error", f"Failed to cancel download: {e}")
+    global aria2_process
 
+    # Kill aria2c.exe process
+    if aria2_process:
+        aria2_process.terminate()
+        aria2_process.wait()
+        aria2_process = None
+
+    # Ensure aria2c.exe is killed
+    try:
+        subprocess.run(["taskkill", "/F", "/IM", "aria2c.exe"], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to kill aria2c.exe: {e}")
+
+    # Delete the newest folder within the downloads folder
+    downloads_folder = os.path.join(os.getcwd(), 'downloads')
+    folders = [os.path.join(downloads_folder, d) for d in os.listdir(downloads_folder) if os.path.isdir(os.path.join(downloads_folder, d))]
+
+    if folders:
+        newest_folder = max(folders, key=os.path.getctime)
+        shutil.rmtree(newest_folder, ignore_errors=True)
+        print(f"Deleted folder: {newest_folder}")
+    else:
+        print("No folders found to delete.")
+
+    # Delete the newest .aria2 file within the downloads folder
+    aria2_files = [os.path.join(downloads_folder, f) for f in os.listdir(downloads_folder) if f.endswith('.aria2')]
+
+    if aria2_files:
+        newest_aria2_file = max(aria2_files, key=os.path.getctime)
+        os.remove(newest_aria2_file)
+        print(f"Deleted .aria2 file: {newest_aria2_file}")
+    else:
+        print("No .aria2 files found to delete.")
 # Function to open non-magnet links in the browser
 def open_link(url):
     webbrowser.open_new_tab(url)
@@ -292,7 +341,7 @@ def update_queue_display():
 
 # Main UI setup
 root = tk.Tk()
-root.title("FitGirl Repacks Search")
+root.title("FitGirl Repacks Downloader")
 root.geometry("800x600")
 root.configure(bg="lightblue")
 
@@ -316,9 +365,6 @@ progress_bar.pack(pady=10)
 
 progress_label = tk.Label(root, text="", font=("Arial", 12, "italic"), bg="lightblue")
 progress_label.pack()
-
-pause_button = tk.Button(root, text="Pause", command=pause_download, font=("Arial", 12, "bold"), state=tk.DISABLED)
-pause_button.pack(side=tk.LEFT, padx=10, pady=10)
 
 cancel_button = tk.Button(root, text="Cancel", command=cancel_download, font=("Arial", 12, "bold"), state=tk.DISABLED)
 cancel_button.pack(side=tk.LEFT, padx=10, pady=10)
